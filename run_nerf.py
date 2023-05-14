@@ -428,7 +428,7 @@ def config_parser():
                         help='experiment name')
     parser.add_argument("--basedir", type=str, default='./logs/', 
                         help='where to store ckpts and logs')
-    parser.add_argument("--datadir", type=str, default='./data/llff/fern', 
+    parser.add_argument("--datadir", type=str, default='./data/llff/fern',
                         help='input data directory')
 
     # training options
@@ -873,6 +873,7 @@ def train():
 
 
 if __name__=='__main__':
+    os.environ["CUDA_VISIBLE_DEVICES"] = "1,0"
     torch.set_default_tensor_type('torch.cuda.FloatTensor')
 
     train()
