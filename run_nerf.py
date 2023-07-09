@@ -37,16 +37,19 @@ def batchify(fn, chunk):
 def run_network(inputs, viewdirs, fn, embed_fn, embeddirs_fn, netchunk=1024*64):
     """Prepares inputs and applies network 'fn'.
     """
+    # flatten the vals and do embedding to them
     inputs_flat = torch.reshape(inputs, [-1, inputs.shape[-1]])
     embedded = embed_fn(inputs_flat)
 
     if viewdirs is not None:
+        # flatten the directions and append them
         input_dirs = viewdirs[:,None].expand(inputs.shape)
         input_dirs_flat = torch.reshape(input_dirs, [-1, input_dirs.shape[-1]])
         embedded_dirs = embeddirs_fn(input_dirs_flat)
         embedded = torch.cat([embedded, embedded_dirs], -1)
-
+    # get the output of networks
     outputs_flat = batchify(fn, netchunk)(embedded)
+    # reshape the output
     outputs = torch.reshape(outputs_flat, list(inputs.shape[:-1]) + [outputs_flat.shape[-1]])
     return outputs
 
@@ -56,6 +59,7 @@ def batchify_rays(rays_flat, chunk=1024*32, **kwargs):
     """
     all_ret = {}
     for i in range(0, rays_flat.shape[0], chunk):
+        # batchify_rays to get rgb,disp,acc result
         ret = render_rays(rays_flat[i:i+chunk], **kwargs)
         for k in ret:
             if k not in all_ret:
@@ -105,24 +109,25 @@ def render(H, W, K, chunk=1024*32, rays=None, c2w=None, ndc=True,
         if c2w_staticcam is not None:
             # special case to visualize effect of viewdirs
             rays_o, rays_d = get_rays(H, W, K, c2w_staticcam)
+        # use unit cartesian product vector to represent directions
         viewdirs = viewdirs / torch.norm(viewdirs, dim=-1, keepdim=True)
         viewdirs = torch.reshape(viewdirs, [-1,3]).float()
 
     sh = rays_d.shape # [..., 3]
     if ndc:
         # for forward facing scenes
+        # make rays' origin closer to imaging plane
         rays_o, rays_d = ndc_rays(H, W, K[0][0], 1., rays_o, rays_d)
 
     # Create ray batch
     rays_o = torch.reshape(rays_o, [-1,3]).float()
     rays_d = torch.reshape(rays_d, [-1,3]).float()
-
+    # get all rays args (rays_o,rays_d,near,far,viewdirs)
     near, far = near * torch.ones_like(rays_d[...,:1]), far * torch.ones_like(rays_d[...,:1])
     rays = torch.cat([rays_o, rays_d, near, far], -1)
     if use_viewdirs:
         rays = torch.cat([rays, viewdirs], -1)
-
-    # Render and reshape
+    # Render and reshape,get rgb,disp and acc result
     all_ret = batchify_rays(rays, chunk, **kwargs)
     for k in all_ret:
         k_sh = list(sh[:-1]) + list(all_ret[k].shape[1:])
@@ -178,26 +183,35 @@ def render_path(render_poses, hwf, K, chunk, render_kwargs, gt_imgs=None, savedi
 def create_nerf(args):
     """Instantiate NeRF's MLP model.
     """
+    # multires : the hyperparameter L in paper , i_embed : decide whether to do embed
+    # embed poses like the paper do
+    # embed function's out_dim is the input dim of network
     embed_fn, input_ch = get_embedder(args.multires, args.i_embed)
-
+    # xxx_views means the direction variable
     input_ch_views = 0
     embeddirs_fn = None
     if args.use_viewdirs:
+        # define embed function for direction variables
         embeddirs_fn, input_ch_views = get_embedder(args.multires_views, args.i_embed)
+    # ??
     output_ch = 5 if args.N_importance > 0 else 4
     skips = [4]
+    # make mlp network just like the paper do
     model = NeRF(D=args.netdepth, W=args.netwidth,
                  input_ch=input_ch, output_ch=output_ch, skips=skips,
                  input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
+    # get the parameters for optimizer
     grad_vars = list(model.parameters())
 
     model_fine = None
     if args.N_importance > 0:
+        # make fine network just like the paper do
         model_fine = NeRF(D=args.netdepth_fine, W=args.netwidth_fine,
                           input_ch=input_ch, output_ch=output_ch, skips=skips,
                           input_ch_views=input_ch_views, use_viewdirs=args.use_viewdirs).to(device)
+        # append the parameters
         grad_vars += list(model_fine.parameters())
-
+    # define the function of using network
     network_query_fn = lambda inputs, viewdirs, network_fn : run_network(inputs, viewdirs, network_fn,
                                                                 embed_fn=embed_fn,
                                                                 embeddirs_fn=embeddirs_fn,
@@ -213,6 +227,7 @@ def create_nerf(args):
     ##########################
 
     # Load checkpoints
+    # find whether trained models
     if args.ft_path is not None and args.ft_path!='None':
         ckpts = [args.ft_path]
     else:
@@ -272,11 +287,12 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
         weights: [num_rays, num_samples]. Weights assigned to each sampled color.
         depth_map: [num_rays]. Estimated distance to object.
     """
+    # define the function to calculate alpha in the paper
     raw2alpha = lambda raw, dists, act_fn=F.relu: 1.-torch.exp(-act_fn(raw)*dists)
-
+    # get all interval's size
     dists = z_vals[...,1:] - z_vals[...,:-1]
     dists = torch.cat([dists, torch.Tensor([1e10]).expand(dists[...,:1].shape)], -1)  # [N_rays, N_samples]
-
+    # get all interval's size along the rays
     dists = dists * torch.norm(rays_d[...,None,:], dim=-1)
 
     rgb = torch.sigmoid(raw[...,:3])  # [N_rays, N_samples, 3]
@@ -294,8 +310,9 @@ def raw2outputs(raw, z_vals, rays_d, raw_noise_std=0, white_bkgd=False, pytest=F
     # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, -1, exclusive=True)
     weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1)), 1.-alpha + 1e-10], -1), -1)[:, :-1]
     rgb_map = torch.sum(weights[...,None] * rgb, -2)  # [N_rays, 3]
-
-    depth_map = torch.sum(weights * z_vals, -1)
+    new_zvals=(z_vals[:,1:]+z_vals[:,:-1])/2
+    new_zvals=torch.cat([new_zvals,z_vals[:,-1:]],-1)
+    depth_map = torch.sum(weights * new_zvals, -1)
     disp_map = 1./torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
     acc_map = torch.sum(weights, -1)
 
@@ -353,7 +370,7 @@ def render_rays(ray_batch,
     viewdirs = ray_batch[:,-3:] if ray_batch.shape[-1] > 8 else None
     bounds = torch.reshape(ray_batch[...,6:8], [-1,1,2])
     near, far = bounds[...,0], bounds[...,1] # [-1,1]
-
+    # sample 64 points with near and far args
     t_vals = torch.linspace(0., 1., steps=N_samples)
     if not lindisp:
         z_vals = near * (1.-t_vals) + far * (t_vals)
@@ -375,13 +392,14 @@ def render_rays(ray_batch,
             np.random.seed(0)
             t_rand = np.random.rand(*list(z_vals.shape))
             t_rand = torch.Tensor(t_rand)
-
+        # sample randomly in each interval
         z_vals = lower + (upper - lower) * t_rand
-
+    # use rays' vector to calculate sampled points
     pts = rays_o[...,None,:] + rays_d[...,None,:] * z_vals[...,:,None] # [N_rays, N_samples, 3]
 
 
 #     raw = run_network(pts)
+    # get the outputs of network : rgb 3 + density 1
     raw = network_query_fn(pts, viewdirs, network_fn)
     rgb_map, disp_map, acc_map, weights, depth_map = raw2outputs(raw, z_vals, rays_d, raw_noise_std, white_bkgd, pytest=pytest)
 
@@ -539,12 +557,16 @@ def train():
     # Load data
     K = None
     if args.dataset_type == 'llff':
+        # read llff data
         images, poses, bds, render_poses, i_test = load_llff_data(args.datadir, args.factor,
                                                                   recenter=True, bd_factor=.75,
                                                                   spherify=args.spherify)
+        # get Height,Width,Focal from poses
         hwf = poses[0,:3,-1]
+        # divide camera to world matrix from poses
         poses = poses[:,:3,:4]
         print('Loaded llff', images.shape, render_poses.shape, hwf, args.datadir)
+        # set images index for training and testing
         if not isinstance(i_test, list):
             i_test = [i_test]
 
@@ -557,6 +579,7 @@ def train():
                         (i not in i_test and i not in i_val)])
 
         print('DEFINING BOUNDS')
+        # set near and far args for sampling rays
         if args.no_ndc:
             near = np.ndarray.min(bds) * .9
             far = np.ndarray.max(bds) * 1.
@@ -611,7 +634,7 @@ def train():
     H, W, focal = hwf
     H, W = int(H), int(W)
     hwf = [H, W, focal]
-
+    # estimate intrinsics
     if K is None:
         K = np.array([
             [focal, 0, 0.5*W],
@@ -639,7 +662,7 @@ def train():
     # Create nerf model
     render_kwargs_train, render_kwargs_test, start, grad_vars, optimizer = create_nerf(args)
     global_step = start
-
+    # define the near and far args for rendering rays
     bds_dict = {
         'near' : near,
         'far' : far,
@@ -716,9 +739,11 @@ def train():
             # Random over all images
             batch = rays_rgb[i_batch:i_batch+N_rand] # [B, 2+1, 3*?]
             batch = torch.transpose(batch, 0, 1)
+            # get the rays to render and the corresponding rgb
             batch_rays, target_s = batch[:2], batch[2]
 
             i_batch += N_rand
+            # get rays for rendering from all images randomly
             if i_batch >= rays_rgb.shape[0]:
                 print("Shuffle data after an epoch!")
                 rand_idx = torch.randperm(rays_rgb.shape[0])
@@ -762,11 +787,12 @@ def train():
                                                 **render_kwargs_train)
 
         optimizer.zero_grad()
+        # calculate the loss
         img_loss = img2mse(rgb, target_s)
         trans = extras['raw'][...,-1]
         loss = img_loss
         psnr = mse2psnr(img_loss)
-
+        # calculate the total loss
         if 'rgb0' in extras:
             img_loss0 = img2mse(extras['rgb0'], target_s)
             loss = loss + img_loss0

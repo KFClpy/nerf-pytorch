@@ -16,7 +16,7 @@ class Embedder:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
         self.create_embedding_fn()
-        
+    # do embed like paper do
     def create_embedding_fn(self):
         embed_fns = []
         d = self.kwargs['input_dims']
@@ -57,8 +57,9 @@ def get_embedder(multires, i=0):
                 'log_sampling' : True,
                 'periodic_fns' : [torch.sin, torch.cos],
     }
-    
+    # define the embedder
     embedder_obj = Embedder(**embed_kwargs)
+    # define the embed function by embedder
     embed = lambda x, eo=embedder_obj : eo.embed(x)
     return embed, embedder_obj.out_dim
 
@@ -75,10 +76,10 @@ class NeRF(nn.Module):
         self.input_ch_views = input_ch_views
         self.skips = skips
         self.use_viewdirs = use_viewdirs
-        
+        # pts_linears : the 1-8 linears in paper image
         self.pts_linears = nn.ModuleList(
             [nn.Linear(input_ch, W)] + [nn.Linear(W, W) if i not in self.skips else nn.Linear(W + input_ch, W) for i in range(D-1)])
-        
+        # view_linears : the 256 + r(d) linear in paper image
         ### Implementation according to the official code release (https://github.com/bmild/nerf/blob/master/run_nerf_helpers.py#L104-L105)
         self.views_linears = nn.ModuleList([nn.Linear(input_ch_views + W, W//2)])
 
@@ -87,8 +88,11 @@ class NeRF(nn.Module):
         #     [nn.Linear(input_ch_views + W, W//2)] + [nn.Linear(W//2, W//2) for i in range(D//2)])
         
         if use_viewdirs:
+            # the 9th linear
             self.feature_linear = nn.Linear(W, W)
+            # the 256 to alpha ,the red box on the 256 in the image of paper
             self.alpha_linear = nn.Linear(W, 1)
+            # the linear 128 to rgb
             self.rgb_linear = nn.Linear(W//2, 3)
         else:
             self.output_linear = nn.Linear(W, output_ch)
@@ -158,16 +162,20 @@ def get_rays(H, W, K, c2w):
     # Rotate ray directions from camera frame to the world frame
     rays_d = torch.sum(dirs[..., np.newaxis, :] * c2w[:3,:3], -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
     # Translate camera frame's origin to the world frame. It is the origin of all rays.
+    # get the origin of camera rays (center of camera)
     rays_o = c2w[:3,-1].expand(rays_d.shape)
     return rays_o, rays_d
 
 
 def get_rays_np(H, W, K, c2w):
+    # get the coordinates of imaging plane
     i, j = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32), indexing='xy')
+    # use the camera center and every point on the imaging plane to get all rays' vector
     dirs = np.stack([(i-K[0][2])/K[0][0], -(j-K[1][2])/K[1][1], -np.ones_like(i)], -1)
     # Rotate ray directions from camera frame to the world frame
     rays_d = np.sum(dirs[..., np.newaxis, :] * c2w[:3,:3], -1)  # dot product, equals to: [c2w.dot(dir) for dir in dirs]
     # Translate camera frame's origin to the world frame. It is the origin of all rays.
+    # get the origin of camera rays (center of camera)
     rays_o = np.broadcast_to(c2w[:3,-1], np.shape(rays_d))
     return rays_o, rays_d
 
@@ -208,6 +216,7 @@ def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
         u = torch.rand(list(cdf.shape[:-1]) + [N_samples])
 
     # Pytest, overwrite u with numpy's fixed random numbers
+    # get random num u
     if pytest:
         np.random.seed(0)
         new_shape = list(cdf.shape[:-1]) + [N_samples]
@@ -220,19 +229,23 @@ def sample_pdf(bins, weights, N_samples, det=False, pytest=False):
 
     # Invert CDF
     u = u.contiguous()
+    # find index for u to insert into cdf
     inds = torch.searchsorted(cdf, u, right=True)
     below = torch.max(torch.zeros_like(inds-1), inds-1)
     above = torch.min((cdf.shape[-1]-1) * torch.ones_like(inds), inds)
+    #get upper and lower bounds of u to insert cdf
     inds_g = torch.stack([below, above], -1)  # (batch, N_samples, 2)
 
     # cdf_g = tf.gather(cdf, inds_g, axis=-1, batch_dims=len(inds_g.shape)-2)
     # bins_g = tf.gather(bins, inds_g, axis=-1, batch_dims=len(inds_g.shape)-2)
     matched_shape = [inds_g.shape[0], inds_g.shape[1], cdf.shape[-1]]
+    # find the corresponding cdf vals and bin vals for u vals
     cdf_g = torch.gather(cdf.unsqueeze(1).expand(matched_shape), 2, inds_g)
     bins_g = torch.gather(bins.unsqueeze(1).expand(matched_shape), 2, inds_g)
-
+    # calculate cdf interval and make those tight cdfs' sampling tighter
     denom = (cdf_g[...,1]-cdf_g[...,0])
     denom = torch.where(denom<1e-5, torch.ones_like(denom), denom)
+    # cdf sample
     t = (u-cdf_g[...,0])/denom
     samples = bins_g[...,0] + t * (bins_g[...,1]-bins_g[...,0])
 
